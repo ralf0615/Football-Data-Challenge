@@ -1,0 +1,388 @@
+---
+title: "Football data challenge"
+author: "Yuchen Li"
+date: "April 21, 2016"
+output: html_document
+---
+
+
+##Data Import
+```{r}
+train = read.csv("train.csv",header = TRUE,sep=",")
+test = read.csv("test.csv",header = TRUE,sep=",")
+
+numeric.sum = function(x)
+{
+    return (sum(as.numeric(x)))     
+}
+
+historic = tapply(train$HomeTeam,train$FTR,table)
+```
+
+##Separate into smaller data frames
+```{r}
+team.name = summary(train$HomeTeam)
+print(team.name)
+team.name = attr(team.name,"names") #Create a list of team names
+library(tree)
+for( i in (1:length(team.name)))
+{
+    assign(team.name[i],train[train$HomeTeam==team.name[i],]) #Create data frame for each home team
+    assign(paste(team.name[i],".tree",sep = ""),tree(FTR~.-ID-Date-HomeTeam,get(team.name[i])))
+}
+```
+
+
+##Predict game result
+```{r}
+result.list=c() ##This is way too complicated
+for (i in (1:dim(test)[1]))
+{
+    home.team = test$HomeTeam[i]
+    tree.name = paste(home.team,".tree",sep="")
+    result = predict(get(tree.name),test.copy[i,])
+    position = which(result==max(result))
+    if (position==1)
+    {
+        result.list=append(result.list,"A")
+    }
+    else if (position==2)
+    {
+        result.list=append(result.list,"D")
+    }
+    else
+    {
+        result.list=append(result.list,"H")
+    }
+}
+```
+
+###Generlized linear model, aka, logistic regression
+```{r}
+train.glm = glm(FTR~.-ID-Date-HomeTeam-AwayTeam,data = train,family = binomial)
+summary(train.glm)
+glm.result = predict(train.glm,test[,-c(1:4)],type = "response")
+```
+##A easier approach which ignores teams, meaning we are only considering odds
+```{r}
+train.tree=tree(FTR~.-ID-Date-HomeTeam-AwayTeam,data = train) #Basic tree model
+summary(train.tree)
+result.list.all = c()
+for (i in (1:dim(test)[1]))
+{
+    result = predict(train.tree,test[i,])
+    position = which(result==max(result))
+    if (position==1)
+    {
+        result.list.all=append(result.list.all,"A")
+    }
+    else if (position==2)
+    {
+        result.list.all=append(result.list.all,"D")
+    }
+    else
+    {
+        result.list.all=append(result.list.all,"H")
+    }
+}
+test=cbind(test,result.list.all)
+submission = test[,c(1,23)]
+colnames(submission) = c("ID","FTR")
+write.table(submission, file = "submission.csv", col.names = TRUE, row.names = FALSE, sep = ",")
+```
+
+##Use cross-validation to improve the model
+```{r}
+cv.train.tree = cv.tree(train.tree,FUN=prune.misclass)
+cv.train.tree
+par(mfrow=c(1,2))
+plot(cv.train.tree$size,cv.train.tree$dev,type="b")
+plot(cv.train.tree$k,cv.train.tree$dev,type="b")
+
+prune.train = prune.misclass(train.tree,best=2)
+plot(prune.train)
+text(prune.train,pretty=0)
+tree.predict = predict(prune.train,test,type="class")
+table(tree.predict)
+submission.2=data.frame(test$ID,tree.predict)
+colnames(submission.2)=c("ID","FTR")
+write.table(submission.2,file="submission2.csv",col.names = TRUE, row.names = FALSE, sep = ",")
+```
+
+##Random Forest
+```{r}
+library(randomForest)
+bag.train = randomForest(FTR~.-ID-Date-HomeTeam-AwayTeam,data = train,importance = TRUE,na.action = na.omit) #missing values need to be omitted, otherwise warnings will present
+bag.train
+rf.predict = predict(bag.train,test)
+submission.3=data.frame(test$ID,rf.predict)
+colnames(submission.3)=c("ID","FTR")
+write.table(submission.3,file="submission3.csv",col.names = TRUE, row.names = FALSE, sep = ",")
+```
+
+##Neural Network
+```{r}
+library(nnet)
+library(neuralnet)
+train = read.csv("train.csv",header = TRUE,sep=",")
+str(train)
+colname = colnames(train.copy)
+train.copy = train[complete.cases(train),]
+ind = sapply(train.copy,is.numeric)
+train.copy[ind] = apply(train.copy[ind],2,scale) #Normalization
+#train.copy$FTR = as.numeric(train.copy$FTR)
+train.copy <- cbind(train.copy[,6:23], class.ind(train.copy$FTR))
+f = paste( "A + D + H ~",paste(colname[!colname %in% c("ID","Date","HomeTeam","AwayTeam","FTR","A","D","H")],collapse = " + ") )
+train.nn = neuralnet(f,data=train.copy,hidden=c(10),linear.output = FALSE,threshold=0.01,stepmax=1e6) 
+
+print(train.nn)
+plot(train.nn)
+
+test = read.csv("test.csv",header = TRUE,sep=",")
+test.copy = test[complete.cases(test),c(-2,-3,-4)]
+ID = test.copy$ID
+ind2 = sapply(test.copy,is.numeric)
+test.copy[ind2] = apply(test.copy[ind2],2,scale) #Normalization
+test.copy=cbind(test.copy,ID)
+predict.nn = compute(train.nn,test.copy[,c(-1,-20)])
+head(predict.nn$net.result,40)
+result = as.data.frame(predict.nn$net.result)
+result.nn=c()
+for (i in (1:dim(result)[1]))
+{
+    position = which(result[i,]==max(result[i,]))
+    if (position==1)
+    {
+        result.nn=append(result.nn,"A")
+    }
+    else if (position==2)
+    {
+        result.nn=append(result.nn,"D")
+    }
+    else
+    {
+        result.nn=append(result.nn,"H")
+    }
+}
+table(result.nn)
+test.copy = cbind(test.copy,result.nn)
+test.copy = test.copy[,-1]
+contains = c() #Bind the result back to test; notice that neural network is fitted to a subset of test due to missing value
+for(i in (1:dim(test)[1])){
+    if(i %in% test.copy$ID){
+        contains = append(contains,as.character(test.copy[ID==i,20]))
+    }
+    else{
+        contains = append(contains,NA)
+    }
+}
+table(contains)
+test = cbind(test,contains)
+
+
+for(i in (which(is.na(test$contains)))){
+    if( (which(test[i,]==max(test[i,c(5:22)],na.rm = TRUE))) %in% c(7,10,13,16,19,22)){
+        test$contains[i] = "A"
+    }
+    else if ( (which(test[i,]==max(test[i,c(5:22)],na.rm = TRUE))) %in% c(7,10,13,16,19,22)-1){
+        test$contains[i] = "D"
+    }
+    else{
+        test$contains[i] = "H"
+    }
+}
+
+submission = test[,c(1,23)]
+colnames(submission)[2] = "FTR"
+write.table(submission,file="submission - c(10).csv",col.names = TRUE, row.names = FALSE, sep = ",")
+```
+
+
+###XGBoost
+```{r}
+require(caret)
+require(corrplot)
+require(Rtsne)
+require(xgboost)
+require(stats)
+require(knitr)
+require(ggplot2)
+
+train.xg = train[,6:23]
+FTR = as.matrix(as.numeric(train$FTR)-1)
+
+##Build machine learning model
+train.xg = as.matrix(train.xg)
+mode(train.xg) = 'numeric'
+test.xg = test[,5:22]
+test.xg = as.matrix(test.xg)
+
+##Parameters
+param <- list("objective" = "multi:softprob",    # multiclass classification 
+              "num_class" = 3,    # number of classes 
+              "eval_metric" = "merror",    # evaluation metric 
+              "max_depth" = 18,    # maximum depth of tree 
+              "eta" = 0.05,    # step size shrinkage 
+              "gamma" = 0,    # minimum loss reduction 
+              "subsample" = 0.85,    # part of data instances to grow tree 
+              "colsample_bytree" = 0.85,  # subsample ratio of columns when constructing each tree 
+              "min_child_weight" = 12  # minimum sum of instance weight needed in a child 
+              )
+
+##Cross Validation
+set.seed(1)
+nround.cv = 200   #k-fold validaton, with timing
+system.time(train.xg.cv <- xgb.cv(param=param, data=train.xg, label=FTR,nfold=4, nrounds=nround.cv, prediction=TRUE, verbose=FALSE,missing = NaN))
+min.merror.idx = which.min(train.xg.cv$dt[,test.merror.mean]) 
+min.merror.idx
+
+##Model Training
+system.time(train.xg.train <- xgboost(param=param, data=train.xg, label=FTR,nrounds=min.merror.idx, verbose=0,missing = NaN))
+pred = predict(train.xg.train,test.xg,missing = NaN)
+pred = matrix(pred,ncol = 3,byrow = T)
+pred.xg = max.col(pred,"last")
+pred.xg = as.data.frame(pred.xg)
+pred.xg$pred.xg[pred.xg$pred.xg == 1] = "A"
+pred.xg$pred.xg[pred.xg$pred.xg == 2] = "D"
+pred.xg$pred.xg[pred.xg$pred.xg == 3] = "H"
+pred.xg = cbind(pred.xg,1:610)
+colnames(pred.xg) = c("FTR","ID")
+pred.xg = pred.xg[,c("ID","FTR")]
+write.table(pred.xg,"submission - xgboost - version2.csv",col.names = T,row.names = F,sep = ",")
+```
+
+###1.csv XGBoost
+```{r}
+library(xgboost)
+train = read.csv("train.csv",header = TRUE,sep=",")
+test = read.csv("test.csv",header = TRUE,sep=",")
+library(lubridate)
+convert = function(dt){
+    dt$Date = as.POSIXct(dt$Date)
+    dt$Month = as.numeric(as.factor(month(dt$Date)))-1
+    dt$Wday = as.numeric(as.factor(wday(dt$Date)))-1
+    dt$Date = NULL
+    dt$HomeTeam = NULL
+    dt$AwayTeam = NULL
+    dt[is.na(dt)]=0 #replace all NA with 0
+    return(dt)
+}
+train = convert(train)
+test = convert(test)
+levels = levels(train$FTR)
+FTR = as.numeric(train$FTR)-1
+ID = test$ID
+train$ID = NULL
+test$ID = NULL
+train$FTR=NULL
+train=as.matrix(train)
+test=as.matrix(test)
+
+##Model Training
+param <- list("objective" = "multi:softmax",    # multiclass classification 
+              "num_class" = 3,    # number of classes 
+              "eval_metric" = "merror",    # evaluation metric 
+              "nthread" = 8,   # number of threads to be used 
+              "eta" = 0.1,    # step size shrinkage 
+              "subsample" = 0.85,    # part of data instances to grow tree 
+              "colsample_bytree" = 0.85  # subsample ratio of columns when constructing each tree
+              )
+set.seed(123)
+xgb.cv.1 = xgb.cv(params = param,data = train,label = FTR,nfold = 5,nrounds = 200)
+which.min(xgb.cv.1$test.merror.mean)
+t.xgb.1 <- xgboost(data = train, label = FTR, params = param, nround = which.min(xgb.cv.1$test.merror.std),verbose = 0,num_class = 3)
+t.xgb.pr.1 = predict(t.xgb.1,test)
+t.xgb.pr.1 = ifelse(t.xgb.pr.1==0,"A",ifelse(t.xgb.pr.1==1,"D","H"))
+result.1 = data.frame(ID,t.xgb.pr.1)
+colnames(result.1) = c("ID","FTR")
+write.csv(result.1,"1.csv",row.names = F)
+```
+
+###2.csv Random Forest
+```{r}
+library(randomForest)
+train = read.csv("train.csv",header = TRUE,sep=",")
+test = read.csv("test.csv",header = TRUE,sep=",")
+library(lubridate)
+convert = function(dt){
+    dt$Date = as.POSIXct(dt$Date)
+    dt$Month = as.factor(as.numeric(month(dt$Date)))
+    dt$Wday = as.factor(as.numeric(wday(dt$Date)))
+    dt$Date = NULL
+    dt$HomeTeam = NULL
+    dt$AwayTeam = NULL
+    dt[is.na(dt)]=0 #replace all NA with 0
+    return(dt)
+}
+train = convert(train)
+test = convert(test)
+levels = levels(train$FTR)
+ID = test$ID
+train$ID = NULL
+test$ID = NULL
+t.rf.2 = randomForest(FTR~.,data = train,importance = TRUE)
+t.rf.pr.2= predict(t.rf.2,test)
+result.2=data.frame(ID,t.rf.pr.2)
+colnames(result.2)=c("ID","FTR")
+write.table(result.2,file="2.csv",col.names = TRUE, row.names = FALSE, sep = ",")
+```
+
+###3.csv stacking XGBoost
+```{r}
+library(xgboost)
+train = read.csv("train.csv",header = TRUE,sep=",")
+test = read.csv("test.csv",header = TRUE,sep=",")
+library(lubridate)
+convert = function(dt){
+    dt$Date = as.POSIXct(dt$Date)
+    dt$Month = as.numeric(as.factor(month(dt$Date)))-1
+    dt$Wday = as.numeric(as.factor(wday(dt$Date)))-1
+    dt$Date = NULL
+    dt$HomeTeam = NULL
+    dt$AwayTeam = NULL
+    dt[is.na(dt)]=0 #replace all NA with 0
+    return(dt)
+}
+train = convert(train)
+test = convert(test)
+levels = levels(train$FTR)
+FTR = as.numeric(train$FTR)-1
+ID = test$ID
+train$ID = NULL
+test$ID = NULL
+train$FTR=NULL
+train=as.matrix(train)
+test=as.matrix(test)
+
+##Model Training
+param <- list("objective" = "multi:softprob",    # multiclass classification 
+              "num_class" = 3,    # number of classes 
+              "eval_metric" = "mlogloss",    # evaluation metric 
+              "nthread" = 8,   # number of threads to be used 
+              "eta" = 0.1,    # step size shrinkage 
+              "subsample" = 0.85,    # part of data instances to grow tree 
+              "colsample_bytree" = 0.85  # subsample ratio of columns when constructing each tree
+              )
+set.seed(8)
+xgb.cv.3 = xgb.cv(params = param,data = train,label = FTR,nfold = 5,nrounds = 200)
+which.min(xgb.cv.3$test.mlogloss.mean)
+
+preds.3 <- vector("list", length = 100)
+
+for(i in 1:100){
+    print(paste('training model:', i))
+    model <- xgboost(data = train, label = FTR, params = param, nround = which.min(xgb.cv.3$test.mlogloss.mean),verbose = 0,num_class = 3)
+    
+    print(paste('applying prediction:', i))
+    preds.3[[i]] <- predict(model, newdata = test)
+}
+
+com_preds.100 <- matrix(colMeans(do.call(rbind, preds.3)),nrow = 610, ncol = 3, byrow = T)
+result.3=c()
+for(i in (1:610)){
+    result.3[i] = ifelse(which.max(com_preds.100[i,])==1,"A",ifelse(which.max(com_preds.100[i,])==2,"D","H"))
+}
+result.3=data.frame(ID,result.3)
+colnames(result.3)=c("ID","FTR")
+write.table(result.3,file="3.csv",col.names = TRUE, row.names = FALSE, sep = ",")
+```
